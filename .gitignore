@@ -1,0 +1,28 @@
+# Build output
+target/
+
+# Session state must never enter version control
+session.json
+*.state.json
+
+# Host-specific MCP registration (absolute local paths)
+.dsh/
+
+# Private app artifact under analysis and every derived extract
+*.xapk
+*.apk
+*.apkm
+extract/
+tmp/
+docs/
+
+# Analysis tooling and its caches
+tools/
+__pycache__/
+*.pyc
+
+# Workspace agent instructions
+AGENTS.md
+
+# Local job output
+*.log

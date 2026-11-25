@@ -1,0 +1,172 @@
+name: release
+
+# A tag is the trigger: pushing `v*` builds every target and attaches the
+# binaries to that tag's release. Building on every push to master would
+# produce artifacts nobody asked to publish, and a release that appears
+# without a tag is harder to retract than one that does not appear at all.
+on:
+  push:
+    tags:
+      - "v*"
+  # Allows a manual run against an existing tag when a build needs redoing
+  # without moving the tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and attach to"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    # A retired runner label leaves the job queued forever, and publish never runs.
+    timeout-minutes: 45
+    strategy:
+      # One broken target should not discard the binaries the others produced.
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: pickle-linux-x86_64
+          - name: linux-aarch64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact: pickle-linux-aarch64
+            cross: true
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: pickle-windows-x86_64.exe
+          - name: macos-aarch64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: pickle-macos-aarch64
+          - name: macos-x86_64
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+            artifact: pickle-macos-x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install the aarch64 cross linker
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # The tests run on the host target only. A cross-built binary cannot be
+      # executed here, so claiming its tests passed would be a claim without
+      # evidence; the host job proves the suite, the cross jobs prove the build.
+      - name: Test (host target)
+        if: ${{ !matrix.cross }}
+        run: cargo test --release --target ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Rename the binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          src="target/${{ matrix.target }}/release/pickle"
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            src="${src}.exe"
+          fi
+          cp "$src" "${{ matrix.artifact }}"
+          ls -l "${{ matrix.artifact }}"
+
+      # The binary must run somewhere to be called usable. Linux runners can
+      # execute the x86_64 build; the aarch64 one is checked structurally only.
+      - name: Smoke test the produced binary
+        if: matrix.name == 'linux-x86_64' || matrix.name == 'windows-x86_64' || matrix.name == 'macos-aarch64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          "./${{ matrix.artifact }}" version
+          "./${{ matrix.artifact }}" help > /dev/null
+          echo "version and help both answered"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
+
+  publish:
+    name: attach to release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine the tag
+        id: tag
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag }}"
+          if [ -z "$tag" ]; then
+            tag="${GITHUB_REF_NAME}"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # The three sections the project requires are generated from the tag and
+      # the built targets, so a section cannot be left out by forgetting to
+      # paste it.
+      - name: Release notes
+        run: |
+          set -euo pipefail
+          tag="${{ steps.tag.outputs.tag }}"
+          binary_lines="$(cd dist && ls -1 | sed 's/^/- /')"
+          {
+            echo "## 変更点"
+            echo ""
+            echo "- $tag のビルド成果物を添付"
+            echo ""
+            echo "## 新機能"
+            echo ""
+            echo "$binary_lines"
+            echo ""
+            echo "## 注意点"
+            echo ""
+            echo "- テストはホスト側ターゲットでのみ実行している。クロスビルドしたバイナリはビルド成功までを確認済み"
+            echo "- 利用には Pickle アカウントでのログインが必要（\`pickle login\`）"
+          } > notes.md
+          cat notes.md
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.tag.outputs.tag }}"
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber
+          else
+            gh release create "$tag" \
+              --title "$tag" \
+              --notes-file notes.md \
+              dist/*
+          fi
