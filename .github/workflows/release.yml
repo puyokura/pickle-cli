@@ -79,6 +79,24 @@ jobs:
         if: ${{ !matrix.cross }}
         run: cargo test --release --target ${{ matrix.target }}
 
+      # A branch behind `#[cfg(target_os = "linux")]` is not compiled on the
+      # Windows and macOS runners, so a type error there can survive every host
+      # test. Linux targets are checkable here because the cross C toolchain is
+      # installable; macOS and Windows targets are not (their C dependencies need
+      # a native toolchain), and those are covered by their own build jobs.
+      - name: Type-check the Linux branches
+        if: matrix.name == 'linux-x86_64'
+        run: |
+          set -euo pipefail
+          # The aarch64 cross linker is installed for `matrix.cross` jobs only, so
+          # this step installs what it needs itself rather than assuming it.
+          rustup target add aarch64-unknown-linux-gnu
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
+            cargo check --quiet --target aarch64-unknown-linux-gnu
+          cargo check --quiet --target x86_64-unknown-linux-gnu
+
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 

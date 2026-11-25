@@ -1254,11 +1254,12 @@ fn device_memory_bytes() -> u64 {
             .args(["-n", "hw.memsize"])
             .output();
         match output {
-            Ok(out) if out.status.success() => out
-                .stdout
-                .iter()
-                .filter(|b| b.is_ascii_digit())
-                .collect::<String>()
+            // `stdout` is bytes, so read it as text and parse. The earlier
+            // version filtered the byte iterator and collected into `String`,
+            // which does not exist for `&u8`; it only failed on macOS because
+            // the branch is behind `cfg`, so a Windows host could not catch it.
+            Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+                .trim()
                 .parse()
                 .unwrap_or(0),
             _ => 0,
